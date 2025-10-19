@@ -291,6 +291,13 @@ class Mmu:
         # Detect Kalico (Danger Klipper) installation
         self.kalico = bool(self.printer.lookup_object('danger_options', False))
 
+
+		# Multi-sensor initialization - extruder and toolhead sensors per gate
+        self.extruder_sensors = [None] * self.num_gates
+        self.extruder_sensor_names = [None] * self.num_gates
+        self.toolhead_sensors = [None] * self.num_gates
+        self.toolhead_sensor_names = [None] * self.num_gates
+
         # Setup remaining hardware like MMU toolhead --------------------------------------------------------
         # We setup MMU hardware during configuration since some hardware like endstop requires
         # configuration during the MCU config phase, which happens before klipper connection
@@ -475,13 +482,6 @@ class Mmu:
         self.tool_speed_multipliers = []
         self.select_tool_macro = config.get('select_tool_macro', default=None)
         self.select_tool_num_switches = config.getint('select_tool_num_switches', default=0, minval=0)
-        
-        # Multi-sensor initialization - extruder and toolhead sensors per gate
-        self.extruder_sensors = [None] * self.num_gates
-        self.extruder_sensor_names = [None] * self.num_gates
-        self.toolhead_sensors = [None] * self.num_gates
-        self.toolhead_sensor_names = [None] * self.num_gates
-
 
         # Logging
         self.log_level = config.getint('log_level', 1, minval=0, maxval=4)
