@@ -1465,7 +1465,7 @@ class Mmu:
     
         # Switch to encoder for currently selected gate
         if 0 <= self.gate_selected < len(self.encoder_sensors):
-            if self.encoder_sensors[gate_selected]:
+            if self.encoder_sensors[self.gate_selected]:
                 self._switch_to_gate_encoder(self.gate_selected)
         else:
             self.calibration_status |= self.CALIBRATED_ENCODER # Pretend we are calibrated to avoid warnings
@@ -1515,6 +1515,16 @@ class Mmu:
 
         # Restore state (only if fully calibrated)
         self._load_persisted_state()
+
+        # ============================================================================
+        # IMPORTANT: Switch to encoder for the currently selected gate after loading state
+        # ============================================================================
+        if hasattr(self, 'gate_selected') and 0 <= self.gate_selected < len(self.encoder_sensors):
+            if self.encoder_sensors[self.gate_selected]:
+                self._switch_to_gate_encoder(self.gate_selected, force=True)
+                self.log_debug("Initialized encoder for gate %d on startup" % self.gate_selected)
+        # ============================================================================
+
 
         # Setup events for managing internal print state machine
         self.printer.register_event_handler("idle_timeout:printing", self._handle_idle_timeout_printing)
