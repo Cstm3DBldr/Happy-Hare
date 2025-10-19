@@ -272,15 +272,17 @@ class MmuSensors:
                 else:
                     self._create_mmu_sensor(config, Mmu.SENSOR_GEAR_PREFIX, gate, switch_pin, event_delay, runout=True)
 
-        # Setup single extruder (entrance) sensor...
-        switch_pin = config.get('extruder_switch_pin', None)
-        if switch_pin:
-            self._create_mmu_sensor(config, Mmu.SENSOR_EXTRUDER_ENTRY, None, switch_pin, event_delay, insert=True, runout=True)
+        # Setup "extruder" sensors per gate...
+        for gate in range(23):
+            switch_pin = config.get('extruder_switch_pin_%d' % gate, None)
+            if switch_pin:
+                self._create_mmu_sensor(config, Mmu.SENSOR_EXTRUDER_ENTRY_PREFIX, gate, switch_pin, event_delay, insert=True, runout=True)
 
-        # Setup single toolhead sensor...
-        switch_pin = config.get('toolhead_switch_pin', None)
-        if switch_pin:
-            self._create_mmu_sensor(config, Mmu.SENSOR_TOOLHEAD, None, switch_pin, event_delay)
+        # Setup "toolhead" sensors per gate...
+        for gate in range(23):
+            switch_pin = config.get('toolhead_switch_pin_%d' % gate, None)
+            if switch_pin:
+                self._create_mmu_sensor(config, Mmu.SENSOR_TOOLHEAD_PREFIX, gate, switch_pin, event_delay)
 
         # Setup motor syncing feedback sensors...
         # (possible to be multiplexed on type-B designs)
