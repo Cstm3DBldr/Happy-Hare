@@ -246,7 +246,8 @@ class MmuSensors:
         event_delay = config.get('event_delay', 0.5)
 
         # Setup "mmu_pre_gate" sensors...
-        for gate in range(23):
+        num_gates = mmu_machine.num_gates if mmu_machine else 23
+        for gate in range(num_gates):
             switch_pin = config.get('pre_gate_switch_pin_%d' % gate, None)
             if switch_pin:
                 self._create_mmu_sensor(config, Mmu.SENSOR_PRE_GATE_PREFIX, gate, switch_pin, event_delay, insert=True, remove=True, runout=True, insert_remove_in_print=True)
@@ -260,7 +261,8 @@ class MmuSensors:
             self._create_mmu_sensor(config, Mmu.SENSOR_GATE, None, switch_pins, event_delay, runout=True)
 
         # Setup "mmu_gear" sensors...
-        for gate in range(23):
+        num_gates = mmu_machine.num_gates if mmu_machine else 23
+        for gate in range(num_gates):
             switch_pin = config.get('post_gear_switch_pin_%d' % gate, None)
             if switch_pin:
                 # EXPERIMENT/HACK to support ViViD analog buffer "endstops"
@@ -273,13 +275,15 @@ class MmuSensors:
                     self._create_mmu_sensor(config, Mmu.SENSOR_GEAR_PREFIX, gate, switch_pin, event_delay, runout=True)
 
         # Setup "extruder" sensors per gate...
-        for gate in range(23):
+        num_gates = mmu_machine.num_gates if mmu_machine else 23
+        for gate in range(num_gates):
             switch_pin = config.get('extruder_switch_pin_%d' % gate, None)
             if switch_pin:
                 self._create_mmu_sensor(config, Mmu.SENSOR_EXTRUDER_ENTRY_PREFIX, gate, switch_pin, event_delay, insert=True, runout=True)
 
         # Setup "toolhead" sensors per gate...
-        for gate in range(23):
+        num_gates = mmu_machine.num_gates if mmu_machine else 23
+        for gate in range(num_gates):
             switch_pin = config.get('toolhead_switch_pin_%d' % gate, None)
             if switch_pin:
                 self._create_mmu_sensor(config, Mmu.SENSOR_TOOLHEAD_PREFIX, gate, switch_pin, event_delay)
