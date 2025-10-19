@@ -724,6 +724,27 @@ class Mmu:
             return self.encoder_sensors[self.gate_selected]
         return None
 
+    def _get_extruder_sensor_name(self, gate=None):
+        """Get the extruder sensor name for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+        return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+
+    def _get_toolhead_sensor_name(self, gate=None):
+        """Get the toolhead sensor name for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+        return "%s_%d" % (self.SENSOR_TOOLHEAD_PREFIX, gate)
+
+    def has_extruder_sensor(self, gate=None):
+        """Check if extruder sensor exists for specified gate"""
+        sensor_name = self._get_extruder_sensor_name(gate)
+        return self.sensor_manager.has_sensor(sensor_name)
+
+    def has_toolhead_sensor(self, gate=None):
+        """Check if toolhead sensor exists for specified gate"""
+        sensor_name = self._get_toolhead_sensor_name(gate)
+        return self.sensor_manager.has_sensor(sensor_name)
 
     # Initialize MMU hardare. Note that logging not set up yet so use main klippy logger
     def _setup_mmu_hardware(self, config):
@@ -1309,28 +1330,6 @@ class Mmu:
         if 0 <= gate < len(self.toolhead_sensors) and self.toolhead_sensors[gate]:
             return self.sensor_manager.check_sensor(self.toolhead_sensor_names[gate])
         return False
-
-    def _get_extruder_sensor_name(self, gate=None):
-        """Get the extruder sensor name for specified gate"""
-        if gate is None:
-            gate = self.gate_selected
-        return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
-
-    def _get_toolhead_sensor_name(self, gate=None):
-        """Get the toolhead sensor name for specified gate"""
-        if gate is None:
-            gate = self.gate_selected
-        return "%s_%d" % (self.SENSOR_TOOLHEAD_PREFIX, gate)
-
-    def has_extruder_sensor(self, gate=None):
-        """Check if extruder sensor exists for specified gate"""
-        sensor_name = self._get_extruder_sensor_name(gate)
-        return self.sensor_manager.has_sensor(sensor_name)
-
-    def has_toolhead_sensor(self, gate=None):
-        """Check if toolhead sensor exists for specified gate"""
-        sensor_name = self._get_toolhead_sensor_name(gate)
-        return self.sensor_manager.has_sensor(sensor_name)
 
     def _setup_logging(self):
         # Setup background file based logging before logging any messages
