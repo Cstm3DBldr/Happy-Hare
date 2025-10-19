@@ -252,6 +252,12 @@ class Mmu:
         self.gcode_move = self.printer.load_object(config, 'gcode_move')
         self.mmu_machine = self.printer.lookup_object("mmu_machine")
         self.num_gates = self.mmu_machine.num_gates
+        # Multi-encoder initialization - MUST be here before anything else
+        self.encoder_sensors = [None] * self.num_gates
+        self.encoder_names = [None] * self.num_gates
+        self.encoder_positions = [0.0] * self.num_gates
+        self.encoder_counts = [0] * self.num_gates
+        self.encoder_sensor = None   
         self.calibration_status = 0b0
         self.w3c_colors = dict(self.W3C_COLORS)
         self.filament_remaining = 0.
@@ -650,12 +656,23 @@ class Mmu:
         self.gcode.register_command('__MMU_SENSOR_REMOVE', self.cmd_MMU_SENSOR_REMOVE, desc = self.cmd_MMU_SENSOR_REMOVE_help)
         self.gcode.register_command('__MMU_SENSOR_INSERT', self.cmd_MMU_SENSOR_INSERT, desc = self.cmd_MMU_SENSOR_INSERT_help)
 
+        # Register in __init__ with other commands:
+        self.gcode.register_command('MMU_ENCODER_STATE', self.cmd_MMU_ENCODER_STATE, 
+                                   desc=self.cmd_MMU_ENCODER_STATE_help)
+        self.gcode.register_command('MMU_ENCODER_CALIBRATIONS', self.cmd_MMU_ENCODER_CALIBRATIONS,
+                                   desc=self.cmd_MMU_ENCODER_CALIBRATIONS_help)
+        self.gcode.register_command('MMU_CALIBRATE_ALL_ENCODERS',
+                                   self.cmd_MMU_CALIBRATE_ALL_ENCODERS,
+                                   desc=self.cmd_MMU_CALIBRATE_ALL_ENCODERS_help)
+        self.gcode.register_command('MMU_ENCODER_FIX', self.cmd_MMU_ENCODER_FIX,
+                                   desc=self.cmd_MMU_ENCODER_FIX_help)
+
         # Initializer tasks
         self.gcode.register_command('__MMU_BOOTUP', self.cmd_MMU_BOOTUP, desc = self.cmd_MMU_BOOTUP_help) # Bootup tasks
 
         # Load development test commands
         _ = MmuTest(self)
-
+        
         # Apply Klipper hacks -------------------------------------------------------------------------------
         if self.update_trsync: # Timer too close mitigation
             try:
@@ -687,6 +704,18 @@ class Mmu:
         self._reset_statistics()
         self.counters = {}
 
+    def get_active_encoder(self):
+        """Get the encoder for the currently selected gate"""
+        # Safety check
+        if not hasattr(self, 'gate_selected'):
+            self.gate_selected = -1
+            return None
+    
+        if self.gate_selected >= 0 and self.gate_selected < len(self.encoder_sensors):
+            return self.encoder_sensors[self.gate_selected]
+        return None
+
+
     # Initialize MMU hardare. Note that logging not set up yet so use main klippy logger
     def _setup_mmu_hardware(self, config):
         logging.info("MMU: Hardware Initialization -------------------------------")
@@ -708,13 +737,513 @@ class Mmu:
         self.led_manager = MmuLedManager(self)
 
         # Get optional encoder setup. TODO Multi-encoder: rework to default name to None and then use lookup to determine if present
-        self.encoder_name = config.get('encoder_name', 'mmu_encoder')
-        self.encoder_sensor = self.printer.lookup_object('mmu_encoder %s' % self.encoder_name, None)
-        if not self.encoder_sensor:
-            logging.warning("MMU: No [mmu_encoder] definition found in mmu_hardware.cfg. Assuming encoder is not available")
-
-        # Load espooler if it exists
+        #self.encoder_name = config.get('encoder_name', 'mmu_encoder')
+        #self.encoder_sensor = self.printer.lookup_object('mmu_encoder %s' % self.encoder_name, None)
+        # ============================================================================
+        # Load encoder objects into pre-initialized arrays
+        # ============================================================================
+        encoder_found = False
+        for gate in range(self.num_gates):
+            encoder_name = config.get('encoder_name_%d' % gate, 'encoder_%d' % gate)
+            encoder_sensor = self.printer.lookup_object('mmu_encoder %s' % encoder_name, None)
+        
+            if encoder_sensor:
+                self.encoder_sensors[gate] = encoder_sensor
+                self.encoder_names[gate] = encoder_name
+                encoder_found = True
+                logging.info("MMU: Found encoder '%s' for gate %d" % (encoder_name, gate))
+            else:
+                logging.warning("MMU: No encoder found for gate %d (tried '%s')" % (gate, encoder_name))
+    
+        if encoder_found:
+            self.encoder_sensor = next((e for e in self.encoder_sensors if e is not None), None)
+            logging.info("MMU: Multi-encoder system initialized")
+        else:
+            logging.warning("MMU: No encoders found")
+            self.encoder_sensor = None
+    
         self.espooler = self.printer.lookup_object('mmu_espooler mmu_espooler', None)
+
+    cmd_MMU_ENCODER_CALIBRATIONS_help = "Display all encoder calibration values"
+    def cmd_MMU_ENCODER_CALIBRATIONS(self, gcmd):
+        """Display calibration info from array"""
+        self.log_to_file(gcmd.get_commandline())
+    
+        # Load calibrations from single variable
+        encoder_resolutions = self.save_variables.allVariables.get('mmu_encoder_resolution', {})
+    
+        # Handle old format
+        if isinstance(encoder_resolutions, float):
+            msg = "Old calibration format detected: %.6f\n" % encoder_resolutions
+            msg += "Run MMU_CALIBRATE_ENCODER on each gate to convert to new format\n"
+            self.log_always(msg)
+            return
+    
+        msg = "Encoder Calibrations:\n"
+        msg += "="*70 + "\n"
+    
+        calibrated_gates = []
+        uncalibrated_gates = []
+    
+        for gate in range(self.num_gates):
+            if self.encoder_sensors[gate]:
+                encoder_name = self.encoder_names[gate]
+                current_resolution = self.encoder_sensors[gate].get_resolution()
+            
+                if gate in encoder_resolutions:
+                    saved_resolution = encoder_resolutions[gate]
+                    status = "? CALIBRATED"
+                    calibrated_gates.append(gate)
+                
+                    msg += "Gate %d: %s\n" % (gate, status)
+                    msg += "  Encoder: %s\n" % encoder_name
+                    msg += "  Current: %.6f\n" % current_resolution
+                    msg += "  Saved:   %.6f\n" % saved_resolution
+                
+                    if abs(current_resolution - saved_resolution) > 0.000001:
+                        msg += "  WARNING: Current differs from saved!\n"
+                else:
+                    status = "? NOT CALIBRATED"
+                    uncalibrated_gates.append(gate)
+                
+                    msg += "Gate %d: %s\n" % (gate, status)
+                    msg += "  Encoder: %s\n" % encoder_name
+                    msg += "  Resolution: %.6f (default)\n" % current_resolution
+            
+                msg += "\n"
+    
+        msg += "="*70 + "\n"
+        msg += "Summary: %d/%d encoders calibrated\n" % (len(calibrated_gates), 
+                                                          len(calibrated_gates) + len(uncalibrated_gates))
+    
+        if uncalibrated_gates:
+            msg += "\nTo calibrate remaining encoders:\n"
+            for gate in uncalibrated_gates:
+                msg += "  MMU_CALIBRATE_ENCODER GATE=%d\n" % gate
+    
+        msg += "\nCalibration data stored in: mmu_encoder_resolution\n"
+        msg += "Format: {0: res0, 1: res1, 2: res2, ...}\n"
+    
+        self.log_always(msg)
+
+    # Optional: Bulk calibrate all gates with same parameters
+    cmd_MMU_CALIBRATE_ALL_ENCODERS_help = "Calibrate all encoders sequentially"
+    def cmd_MMU_CALIBRATE_ALL_ENCODERS(self, gcmd):
+        """Calibrate all gates in sequence"""
+        self.log_to_file(gcmd.get_commandline())
+    
+        length = gcmd.get_float('LENGTH', 400., above=0.)
+        repeats = gcmd.get_int('REPEATS', 3, minval=1, maxval=10)
+    
+        self.log_always("Starting bulk calibration of all %d encoders..." % self.num_gates)
+    
+        for gate in range(self.num_gates):
+            if self.encoder_sensors[gate]:
+                self.log_always("\n" + "="*60)
+                self.log_always("Calibrating gate %d..." % gate)
+                self.log_always("="*60)
+            
+                try:
+                    # Create a temporary gcmd with gate parameter
+                    from extras.homing import CommandDispatch
+                    temp_gcmd = CommandDispatch()
+                    temp_gcmd.get_float = lambda k, d=None, **kw: length if k == 'LENGTH' else d
+                    temp_gcmd.get_int = lambda k, d=None, **kw: repeats if k == 'REPEATS' else gate if k == 'GATE' else d
+                    temp_gcmd.error = gcmd.error
+                
+                    # Run calibration
+                    self.cmd_MMU_CALIBRATE_ENCODER(temp_gcmd)
+                
+                except Exception as e:
+                    self.log_error("Failed to calibrate gate %d: %s" % (gate, str(e)))
+                    if gcmd.get_int('CONTINUE_ON_ERROR', 0):
+                        continue
+                    else:
+                        raise
+    
+        self.log_always("\n" + "="*60)
+        self.log_always("Bulk calibration complete!")
+        self.log_always("="*60)
+    
+        # Show summary
+        self.cmd_MMU_ENCODER_CALIBRATIONS(gcmd)
+
+    def _encoder_operation_wrapper(self, operation_name, gate=None, *args, **kwargs):
+        """
+        Generic wrapper for encoder operations that ensures correct encoder is active.
+    
+        Args:
+            operation_name: Name of the encoder method to call
+            gate: Gate number (uses current gate if None)
+            *args, **kwargs: Arguments to pass to the encoder method
+        """
+        if gate is None:
+            gate = self.gate_selected
+    
+        # Verify and switch to correct encoder
+        if not self._switch_to_gate_encoder(gate):
+            self.log_error("Failed to switch to encoder for gate %d" % gate)
+            return None
+    
+        # Get the encoder for this gate
+        encoder = self.encoder_sensors[gate]
+        if encoder is None:
+            self.log_error("No encoder for gate %d" % gate)
+            return None
+    
+        # Call the operation on the encoder
+        if hasattr(encoder, operation_name):
+            method = getattr(encoder, operation_name)
+            return method(*args, **kwargs)
+        else:
+            self.log_error("Encoder does not have method: %s" % operation_name)
+            return None
+    
+        # Convenience wrappers for common encoder operations with auto state management:
+
+    def encoder_get_distance(self, gate=None, dwell=None):
+        """Get encoder distance with automatic gate switching"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if not self._switch_to_gate_encoder(gate):
+            return 0.0
+    
+        if dwell is not None:
+            self.movequeues_dwell(dwell, mmu_toolhead=True)
+    
+        return self._encoder_operation_wrapper('get_distance', gate=gate)
+
+    def encoder_set_distance(self, distance, gate=None, save=True):
+        """Set encoder distance with automatic gate switching and optional persistence"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        result = self._encoder_operation_wrapper('set_distance', gate=gate, 
+                                            save_after=save, distance=distance)
+    
+        # Update our tracking
+        if result is not None and 0 <= gate < len(self.encoder_positions):
+            self.encoder_positions[gate] = distance
+    
+        return result
+
+    def encoder_reset_counts(self, gate=None, save=True):
+        """Reset encoder with automatic gate switching and optional persistence"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        result = self._encoder_operation_wrapper('reset_counts', gate=gate, save_after=save)
+    
+        # Update our tracking
+        if result is not None and 0 <= gate < len(self.encoder_positions):
+            self.encoder_positions[gate] = 0.0
+            self.encoder_counts[gate] = 0
+    
+        return result
+
+    def encoder_get_status(self, gate=None):
+        """Get encoder status with automatic gate switching"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if not self._switch_to_gate_encoder(gate):
+            return {}
+    
+        return self._encoder_operation_wrapper('get_status', gate=gate, 
+                                              eventtime=self.reactor.monotonic())
+
+    # Command implementation:
+    cmd_MMU_ENCODER_STATE_help = "Display or manage multi-encoder states"
+    def cmd_MMU_ENCODER_STATE(self, gcmd):
+        """Display encoder states with calibration info from array"""
+        self.log_to_file(gcmd.get_commandline())
+    
+        action = gcmd.get('ACTION', 'SHOW').upper()
+    
+        if action == 'SHOW':
+            # Load calibration data
+            encoder_resolutions = self.save_variables.allVariables.get('mmu_encoder_resolution', {})
+            if isinstance(encoder_resolutions, float):
+                encoder_resolutions = {}  # Old format, treat as not calibrated
+        
+            msg = "Multi-Encoder States:\n"
+            msg += "Currently selected gate: %d\n\n" % self.gate_selected
+        
+            for gate in range(len(self.encoder_sensors)):
+                if self.encoder_sensors[gate]:
+                    active = " (ACTIVE)" if gate == self.gate_selected else ""
+                    msg += "Gate %d%s:\n" % (gate, active)
+                    msg += "  Encoder: %s\n" % self.encoder_names[gate]
+                
+                    # Show calibration status from array
+                    resolution = self.encoder_sensors[gate].get_resolution()
+                    is_calibrated = gate in encoder_resolutions
+                
+                    msg += "  Resolution: %.6f %s\n" % (resolution, 
+                                                         "(calibrated)" if is_calibrated else "(default)")
+                
+                    msg += "  Saved Position: %.2fmm\n" % self.encoder_positions[gate]
+                    msg += "  Saved Counts: %d\n" % self.encoder_counts[gate]
+                
+                    if gate == self.gate_selected:
+                        current = self.encoder_sensors[gate].get_distance()
+                        msg += "  Current Position: %.2fmm\n" % current
+                
+                    # Check pre-gate sensor
+                    sensor_name = "%s_%d" % (self.SENSOR_PRE_GATE_PREFIX, gate)
+                    if self.sensor_manager.has_sensor(sensor_name):
+                        state = self.sensor_manager.check_sensor(sensor_name)
+                        msg += "  Pre-gate Sensor: %s\n" % ("DETECTED" if state else "EMPTY")
+                    msg += "\n"
+        
+            self.log_always(msg)
+    
+        elif action == 'PERSIST':
+            self._save_all_encoder_states()
+            self._persist_encoder_positions()
+            self.log_info("Encoder states persisted")
+    
+        elif action == 'RESET':
+            gate = gcmd.get_int('GATE', -1, minval=-1, maxval=self.num_gates-1)
+            if gate >= 0:
+                if self.encoder_sensors[gate]:
+                    self.encoder_positions[gate] = 0.0
+                    self.encoder_counts[gate] = 0
+                    if gate == self.gate_selected:
+                        self.encoder_sensors[gate].reset_counts()
+                    self.log_info("Reset encoder for gate %d" % gate)
+            else:
+                # Reset all
+                for g in range(len(self.encoder_sensors)):
+                    if self.encoder_sensors[g]:
+                        self.encoder_positions[g] = 0.0
+                        self.encoder_counts[g] = 0
+                        if g == self.gate_selected:
+                            self.encoder_sensors[g].reset_counts()
+                self.log_info("Reset all encoders")
+    
+        else:
+            raise gcmd.error("Invalid ACTION: use SHOW, PERSIST, or RESET")
+
+    def _save_current_encoder_state(self):
+        """Save the current encoder's position before switching gates"""
+        # Use Happy Hare's gate_selected variable
+        if 0 <= self.gate_selected < len(self.encoder_sensors):
+            encoder = self.encoder_sensors[self.gate_selected]
+            if encoder:
+                self.encoder_positions[self.gate_selected] = encoder.get_distance()
+                self.encoder_counts[self.gate_selected] = encoder.get_counts()
+                self.log_trace("Saved encoder state for gate %d: %.2fmm, %d counts" % 
+                              (self.gate_selected, 
+                               self.encoder_positions[self.gate_selected],
+                               self.encoder_counts[self.gate_selected]))
+
+    def _restore_encoder_state(self, gate):
+        """Restore saved encoder position for specified gate"""
+        if 0 <= gate < len(self.encoder_sensors):
+            encoder = self.encoder_sensors[gate]
+            if encoder:
+                saved_position = self.encoder_positions[gate]
+                encoder.set_distance(saved_position)
+                self.log_trace("Restored encoder state for gate %d: %.2fmm" % (gate, saved_position))
+
+    def get_active_encoder(self):
+        """Get the encoder for the currently selected gate"""
+        # Safety check
+        if not hasattr(self, 'gate_selected'):
+            self.gate_selected = -1
+            return None
+    
+        if self.gate_selected >= 0 and self.gate_selected < len(self.encoder_sensors):
+            return self.encoder_sensors[self.gate_selected]
+        return None
+
+    def has_encoder(self, gate=None):
+        """Check if encoder exists for specified gate or current gate"""
+        # Safety checks
+        if not hasattr(self, 'encoder_sensors') or not self.encoder_sensors:
+            return False
+    
+        if gate is None:
+            gate = self.gate_selected
+    
+        if gate < 0 or gate >= len(self.encoder_sensors):
+            return False
+    
+        return self.encoder_sensors[gate] is not None
+
+    def get_encoder_distance(self, gate=None, dwell=None):
+        """Get encoder distance for specified gate or current gate"""
+        # Safety checks
+        if not hasattr(self, 'encoder_sensors') or not self.encoder_sensors:
+            return 0.0
+    
+        if gate is None:
+            gate = self.gate_selected
+    
+        if gate < 0 or gate >= len(self.encoder_sensors):
+            return 0.0
+    
+        encoder = self.encoder_sensors[gate]
+    
+        if encoder:
+            if dwell is not None:
+                self.movequeues_dwell(dwell, mmu_toolhead=True)
+            return encoder.get_distance()
+        return 0.0
+
+    def set_encoder_distance(self, distance, gate=None):
+        """Set encoder distance for specified gate or current gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        encoder = self.encoder_sensors[gate] if 0 <= gate < len(self.encoder_sensors) else None
+    
+        if encoder:
+            encoder.set_distance(distance)
+            # Also update our tracking
+            if 0 <= gate < len(self.encoder_positions):
+                self.encoder_positions[gate] = distance
+
+    def reset_encoder_counts(self, gate=None):
+        """Reset encoder counts for specified gate or current gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        encoder = self.encoder_sensors[gate] if 0 <= gate < len(self.encoder_sensors) else None
+    
+        if encoder:
+            encoder.reset_counts()
+            # Also reset our tracking
+            if 0 <= gate < len(self.encoder_positions):
+                self.encoder_positions[gate] = 0.0
+                self.encoder_counts[gate] = 0
+
+    def get_all_encoder_positions(self):
+        """Get saved positions for all encoders (useful for debugging)"""
+        positions = {}
+        for gate in range(len(self.encoder_positions)):
+            if self.encoder_sensors[gate] is not None:
+                positions[gate] = {
+                    'saved_position': self.encoder_positions[gate],
+                    'saved_counts': self.encoder_counts[gate],
+                    'current_position': self.encoder_sensors[gate].get_distance() if gate == self.gate_selected else None
+                }
+        return positions
+
+    def _verify_gate_sensor_before_encoder(self, gate):
+        """Check pre-gate sensor before using encoder"""
+        if gate < 0 or gate >= self.num_gates:
+            return False
+    
+        pre_gate_sensor_name = "%s_%d" % (self.SENSOR_PRE_GATE_PREFIX, gate)
+    
+        if self.sensor_manager.has_sensor(pre_gate_sensor_name):
+            if not self.sensor_manager.check_sensor(pre_gate_sensor_name):
+                self.log_warning("Pre-gate sensor for gate %d: no filament detected" % gate)
+                return False
+            self.log_trace("Pre-gate sensor for gate %d: filament detected" % gate)
+    
+        return True
+
+    def _switch_to_gate_encoder(self, gate, force=False):
+        """
+        Switch to encoder for specified gate with state save/restore.
+        Uses Happy Hare's self.gate_selected to track current gate.
+        """
+        # Validate gate
+        if gate < 0 or gate >= len(self.encoder_sensors):
+            self.log_error("Invalid gate %d for encoder switch" % gate)
+            return False
+    
+        # Skip if already on this gate (gate_selected is already set by Happy Hare)
+        # We just need to switch the encoder reference
+        old_gate = self.gate_selected if hasattr(self, 'gate_selected') else -1
+    
+        # Only switch if different gate or forcing
+        if not force and gate == old_gate and self.encoder_sensor == self.encoder_sensors[gate]:
+            return True
+    
+        # Verify sensor
+        self._verify_gate_sensor_before_encoder(gate)
+    
+        # Get new encoder
+        new_encoder = self.encoder_sensors[gate]
+        if new_encoder is None:
+            self.log_error("No encoder for gate %d" % gate)
+            return False
+    
+        # Save current encoder state (before switching)
+        if old_gate >= 0 and old_gate < len(self.encoder_sensors):
+            self._save_current_encoder_state()
+    
+        # Switch encoder reference to new gate's encoder
+        self.encoder_sensor = new_encoder
+    
+        # Restore saved state for new encoder
+        self._restore_encoder_state(gate)
+    
+        if old_gate != gate:
+            self.log_debug("Switched encoder: gate %d -> gate %d" % (old_gate, gate))
+    
+        return True
+
+    def _save_all_encoder_states(self):
+        """Save all encoder states"""
+        self._save_current_encoder_state()
+
+    def _persist_encoder_positions(self):
+        """Save encoder positions to mmu_vars.cfg"""
+        if not self.save_variables:
+            return
+    
+        positions_dict = {}
+        counts_dict = {}
+    
+        for gate in range(len(self.encoder_sensors)):
+            if self.encoder_sensors[gate]:
+                positions_dict[gate] = round(self.encoder_positions[gate], 2)
+                counts_dict[gate] = self.encoder_counts[gate]
+    
+        self.save_variable("mmu_encoder_positions", positions_dict, write=False)
+        self.save_variable("mmu_encoder_counts", counts_dict, write=True)
+
+    def _load_persisted_encoder_positions(self):
+        """Load encoder positions from mmu_vars.cfg"""
+        if not self.save_variables:
+            return
+    
+        positions_dict = self.save_variables.allVariables.get("mmu_encoder_positions", {})
+        counts_dict = self.save_variables.allVariables.get("mmu_encoder_counts", {})
+    
+        for gate_str, position in positions_dict.items():
+            gate = int(gate_str)
+            if 0 <= gate < len(self.encoder_positions):
+                self.encoder_positions[gate] = position
+                self.encoder_counts[gate] = counts_dict.get(gate_str, 0)
+                self.log_debug("Restored encoder position for gate %d: %.2fmm" % (gate, position))
+
+    def _setup_encoder_persist_timer(self):
+        """Setup periodic timer to persist encoder positions"""
+        persist_interval = 300.0  # Persist every 5 minutes
+        self.encoder_persist_timer = self.reactor.register_timer(
+            self._encoder_persist_callback, 
+            self.reactor.monotonic() + persist_interval
+        )
+
+    def _encoder_persist_callback(self, eventtime):
+        """Callback to periodically persist encoder states"""
+        try:
+            self._save_all_encoder_states()
+            self._persist_encoder_positions()
+        except Exception as e:
+            self.log_error("Error persisting encoder states: %s" % str(e))
+    
+        # Schedule next callback in 5 minutes
+        return eventtime + 300.0
+
+
 
     def _setup_logging(self):
         # Setup background file based logging before logging any messages
@@ -731,7 +1260,6 @@ class Mmu:
 
     def handle_connect(self):
         self._setup_logging()
-
         self.toolhead = self.printer.lookup_object('toolhead')
         self.sensor_manager.reset_active_unit(self.unit_selected)
 
@@ -880,21 +1408,65 @@ class Mmu:
         self.save_variables.allVariables[self.VARS_MMU_GEAR_ROTATION_DISTANCES] = self.rotation_distances
 
         # Load encoder configuration (calibration set with MMU_CALIBRATE_ENCODER) ---------------------------
-        self.encoder_resolution = 1.0
-        if self.has_encoder():
-            self.encoder_resolution = self.encoder_sensor.get_resolution()
-            self.encoder_sensor.set_logger(self.log_debug) # Combine with MMU log
-            self.encoder_sensor.set_extruder(self.extruder_name)
-            self.encoder_sensor.set_mode(self.enable_clog_detection)
+        #self.encoder_resolution = 1.0
+        #if self.has_encoder():
+        #    self.encoder_resolution = self.encoder_sensor.get_resolution()
+        #    self.encoder_sensor.set_logger(self.log_debug) # Combine with MMU log
+        #    self.encoder_sensor.set_extruder(self.extruder_name)
+        #    self.encoder_sensor.set_mode(self.enable_clog_detection)
 
-            resolution = self.save_variables.allVariables.get(self.VARS_MMU_ENCODER_RESOLUTION, None)
-            if resolution:
-                self.encoder_resolution = resolution
-                self.encoder_sensor.set_resolution(resolution)
-                self.log_debug("Loaded saved encoder resolution: %.4f" % resolution)
+        
+
+        # ============================================================================
+        # Setup all encoders
+        # ============================================================================
+        self.encoder_resolution = 1.0
+        encoder_resolutions = []
+        encoder_resolutions = self.save_variables.allVariables.get('mmu_encoder_resolution', {})
+    
+        # Handle old single-value format (backward compatibility)
+        if isinstance(encoder_resolutions, float):
+            # Old format: single float value
+            old_resolution = encoder_resolutions
+            encoder_resolutions = {}
+            # Apply to all gates for smooth migration
+            for gate in range(self.num_gates):
+                if self.encoder_sensors[gate]:
+                    encoder_resolutions[gate] = old_resolution
+            self.log_info("Migrated old encoder resolution (%.6f) to all gates" % old_resolution)
+    
+        # Apply resolutions to each encoder
+        for gate in range(self.num_gates):
+            encoder = self.encoder_sensors[gate]
+            if encoder:
+                encoder.set_logger(self.log_debug)
+                encoder.set_extruder(self.extruder_name)
+                encoder.set_mode(self.enable_clog_detection)
+            
+                # Get resolution for this gate from dictionary
+                if gate in encoder_resolutions:
+                    resolution = encoder_resolutions[gate]
+                    encoder.set_resolution(resolution)
+                    self.log_debug("Gate %d encoder resolution: %.6f (loaded)" % (gate, resolution))
+                else:
+                    # Not calibrated yet, use default
+                    resolution = encoder.get_resolution()
+                    self.log_warning("Gate %d encoder not calibrated, using default: %.6f" % (gate, resolution))
+    
+        # Set default resolution for backward compatibility
+        if any(self.encoder_sensors):
+            first_encoder = next((e for e in self.encoder_sensors if e is not None), None)
+            if first_encoder:
+                self.encoder_resolution = first_encoder.get_resolution()
                 self.calibration_status |= self.CALIBRATED_ENCODER
-            else:
-                self.log_warning("Warning: Encoder resolution not found in mmu_vars.cfg. Probably not calibrated")
+    
+        # Load persisted encoder positions
+        self._load_persisted_encoder_positions()
+    
+        # Switch to encoder for currently selected gate
+        if 0 <= self.gate_selected < len(self.encoder_sensors):
+            if self.encoder_sensors[gate_selected]:
+                self._switch_to_gate_encoder(self.gate_selected)
         else:
             self.calibration_status |= self.CALIBRATED_ENCODER # Pretend we are calibrated to avoid warnings
 
@@ -918,7 +1490,13 @@ class Mmu:
         return lst
 
     def handle_disconnect(self):
-        self.log_debug('Klipper disconnected!')
+	# Save all encoder states before disconnect
+        if hasattr(self, 'encoder_sensors') and self.encoder_sensors:
+            self._save_all_encoder_states()
+            self._persist_encoder_positions()
+
+        self.log_debug('Klipper disconnected! - Encoder states saved.')
+        # self.log_debug('Klipper disconnected!')
 
         # Sub components
         self.selector.handle_disconnect()
@@ -942,10 +1520,12 @@ class Mmu:
         self.printer.register_event_handler("idle_timeout:printing", self._handle_idle_timeout_printing)
         self.printer.register_event_handler("idle_timeout:ready", self._handle_idle_timeout_ready)
         self.printer.register_event_handler("idle_timeout:idle", self._handle_idle_timeout_idle)
-
+	
         self._setup_hotend_off_timer()
         self._setup_pending_spool_id_timer()
         self._clear_saved_toolhead_position()
+
+        self._setup_encoder_persist_timer()
 
         # This is a bit naughty to register commands here but I need to make sure we are the outermost wrapper
         try:
@@ -1006,6 +1586,14 @@ class Mmu:
         self.pending_spool_id = -1 # For automatic assignment of spool_id if set perhaps by rfid reader
         self.saved_toolhead_max_accel = None
         self.num_toolchanges = 0
+        # ============================================================================
+        # IMPORTANT: Reset encoder tracking state
+        # ============================================================================
+        # Reset encoder positions and counts (but don't change encoder_sensors list)
+        if hasattr(self, 'encoder_positions'):
+            for gate in range(self.num_gates):
+                self.encoder_positions[gate] = 0.0
+                self.encoder_counts[gate] = 0
 
         # Sub components
         self.selector.reinit()
@@ -2403,14 +2991,14 @@ class Mmu:
 
     # Start: Assumes filament is loaded through encoder
     # End: Does not eject filament at end (filament same as start)
-    cmd_MMU_CALIBRATE_ENCODER_help = "Calibration routine for the MMU encoder"
+    cmd_MMU_CALIBRATE_ENCODER_help = "Calibration routine for the MMU encoder(s)"
     def cmd_MMU_CALIBRATE_ENCODER(self, gcmd):
         self.log_to_file(gcmd.get_commandline())
         if self.check_if_disabled(): return
         if self._check_has_encoder(): return
         if self.check_if_bypass(): return
         if self.check_if_not_calibrated(self.CALIBRATED_GEAR_0, check_gates=[self.gate_selected]): return
-
+    
         length = gcmd.get_float('LENGTH', 400., above=0.)
         repeats = gcmd.get_int('REPEATS', 3, minval=1, maxval=10)
         speed = gcmd.get_float('SPEED', self.gear_from_buffer_speed, minval=10.)
@@ -2418,8 +3006,10 @@ class Mmu:
         min_speed = gcmd.get_float('MINSPEED', speed, above=0.)
         max_speed = gcmd.get_float('MAXSPEED', speed, above=0.)
         save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
-        advance = 60. # Ensure filament is in encoder even if not loaded by user
-
+        advance = 60.
+    
+        calibration_gate = self.gate_selected
+    
         try:
             with self.wrap_sync_gear_to_extruder():
                 with self._require_encoder():
@@ -2429,12 +3019,158 @@ class Mmu:
                     if measured < self.encoder_min:
                         raise MmuError("Filament not detected in encoder. Ensure filament is available and try again")
                     self._unload_tool()
-                    self.calibration_manager.calibrate_encoder(length, repeats, speed, min_speed, max_speed, accel, save)
+                
+                    # ============================================================
+                    # Store old save method and intercept
+                    # ============================================================
+                    captured_resolution = [None]
+                    old_save = self.save_variable
+                
+                    def capture_save(var, val, write=True):
+                        if var == self.VARS_MMU_ENCODER_RESOLUTION:
+                            captured_resolution[0] = val
+                            return  # Don't actually save
+                        old_save(var, val, write)
+                
+                    self.save_variable = capture_save
+                
+                    # Run calibration with save=1 (so it applies the resolution)
+                    self.calibration_manager.calibrate_encoder(length, repeats, speed, min_speed, max_speed, accel, save=1)
+                
+                    # Restore
+                    self.save_variable = old_save
+                    # ============================================================
+                
+                    # ============================================================
+                    # Save with our dictionary format
+                    # ============================================================
+                    if save and captured_resolution[0] is not None:
+                        calc_res = captured_resolution[0]
+                    
+                        resolutions = self.save_variables.allVariables.get(self.VARS_MMU_ENCODER_RESOLUTION, {})
+                        
+                        if isinstance(resolutions, (float, int)):
+                            resolutions = {0: float(resolutions)}
+                        if not isinstance(resolutions, dict):
+                            resolutions = {}
+                    
+                        resolutions[calibration_gate] = round(calc_res, 6)
+
+                        resolutions = dict(sorted(resolutions.items()))
+
+                        self.save_variable(self.VARS_MMU_ENCODER_RESOLUTION, resolutions, write=True)
+
+                        self.log_always("Saved gate %d: %.6f" % (calibration_gate, calc_res))
+                    # ============================================================
+                
                     _,_,_,_ = self.trace_filament_move("Parking filament", -advance)
+                
         except MmuError as ee:
             self.handle_mmu_error(str(ee))
         finally:
             self.calibrating = False
+    
+    cmd_MMU_ENCODER_FIX_help = "Manually check and fix encoder resolution dictionary"
+    def cmd_MMU_ENCODER_FIX(self, gcmd):
+        """Debug command to check and fix encoder resolutions"""
+        self.log_to_file(gcmd.get_commandline())
+    
+        action = gcmd.get('ACTION', 'CHECK').upper()
+    
+        if action == 'CHECK':
+            # Check current state
+            self.log_always("="*60)
+            self.log_always("ENCODER RESOLUTION DICTIONARY CHECK")
+            self.log_always("="*60)
+        
+            resolutions = self.save_variables.allVariables.get(self.VARS_MMU_ENCODER_RESOLUTION, {})
+        
+            self.log_always("Variable name: %s" % self.VARS_MMU_ENCODER_RESOLUTION)
+            self.log_always("Current value: %s" % str(resolutions))
+            self.log_always("Type: %s" % type(resolutions))
+        
+            if isinstance(resolutions, dict):
+                self.log_always("\nDictionary contents:")
+                for gate, res in resolutions.items():
+                    self.log_always("  Gate %d: %.6f" % (gate, res))
+            
+                self.log_always("\nMissing gates:")
+                for gate in range(self.num_gates):
+                    if self.encoder_sensors[gate] and gate not in resolutions:
+                        self.log_always("  Gate %d: NOT CALIBRATED" % gate)
+            else:
+                self.log_always("WARNING: Not a dictionary! Type is: %s" % type(resolutions))
+    
+        elif action == 'COPY':
+            # Copy resolution from one gate to another
+            from_gate = gcmd.get_int('FROM', minval=0, maxval=self.num_gates-1)
+            to_gate = gcmd.get_int('TO', minval=0, maxval=self.num_gates-1)
+        
+            resolutions = self.save_variables.allVariables.get(self.VARS_MMU_ENCODER_RESOLUTION, {})
+        
+            if not isinstance(resolutions, dict):
+                resolutions = {}
+        
+            if from_gate not in resolutions:
+                raise gcmd.error("Gate %d is not calibrated" % from_gate)
+            
+            resolutions[to_gate] = resolutions[from_gate]
+            self.save_variable(self.VARS_MMU_ENCODER_RESOLUTION, resolutions, write=True)
+        
+            self.log_always("Copied gate %d (%.6f) to gate %d" % 
+                           (from_gate, resolutions[from_gate], to_gate))
+    
+        elif action == 'SETALL':
+            # Set all gates to the same value
+            value = gcmd.get_float('VALUE')
+        
+            resolutions = self.save_variables.allVariables.get(self.VARS_MMU_ENCODER_RESOLUTION, {})
+        
+            if not isinstance(resolutions, dict):
+                resolutions = {}
+        
+            for gate in range(self.num_gates):
+                if self.encoder_sensors[gate]:
+                    resolutions[gate] = round(value, 6)
+        
+            self.save_variable(self.VARS_MMU_ENCODER_RESOLUTION, resolutions, write=True)
+        
+            self.log_always("Set all gates to %.6f" % value)
+    
+        elif action == 'RESET':
+            # Reset to empty dict
+            self.save_variable(self.VARS_MMU_ENCODER_RESOLUTION, {}, write=True)
+            self.log_always("Reset encoder resolutions to empty dictionary")
+    
+        else:
+            raise gcmd.error("Invalid ACTION. Use: CHECK, COPY, SETALL, or RESET")
+
+    # Register the debug command in __init__:
+    # self.gcode.register_command('MMU_ENCODER_FIX', self.cmd_MMU_ENCODER_FIX,
+    #                            desc=self.cmd_MMU_ENCODER_FIX_help)
+
+    def verify_encoder_sensors_setup(self):
+        """Check that encoder_sensors array is properly populated"""
+        self.log_always("="*60)
+        self.log_always("ENCODER SENSORS VERIFICATION")
+        self.log_always("="*60)
+    
+        if not hasattr(self, 'encoder_sensors'):
+            self.log_always("ERROR: encoder_sensors attribute does not exist!")
+            return
+    
+        self.log_always("encoder_sensors is a: %s" % type(self.encoder_sensors))
+        self.log_always("Length: %d" % len(self.encoder_sensors))
+    
+        for gate in range(len(self.encoder_sensors)):
+            encoder = self.encoder_sensors[gate]
+            if encoder:
+                resolution = encoder.get_resolution()
+                self.log_always("Gate %d: FOUND (resolution: %.6f)" % (gate, resolution))
+            else:
+                self.log_always("Gate %d: None/Missing" % gate)
+
+
 
     # Calibrated bowden length is always from chosen gate homing point to the entruder gears
     # Start: With desired gate selected
@@ -3158,11 +3894,18 @@ class Mmu:
             return True
         return False
 
-    def has_encoder(self):
-        return self.encoder_sensor is not None and not self.test_disable_encoder
+    def has_encoder(self, gate=None):
+        """Check if encoder exists for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if gate < 0 or gate >= len(self.encoder_sensors):
+            return False
+    
+        return self.encoder_sensors[gate] is not None    
 
     def _can_use_encoder(self):
-        return self.has_encoder() and self.encoder_move_validation
+            return self.has_encoder() and self.encoder_move_validation
 
     def _check_has_encoder(self):
         if not self.has_encoder():
@@ -3206,11 +3949,15 @@ class Mmu:
         finally:
             self.encoder_move_validation = validate
 
-    def get_encoder_distance(self, dwell=False):
-        if self._encoder_dwell(dwell):
-            return self.encoder_sensor.get_distance()
-        else:
-            return 0.
+    def get_encoder_distance(self, dwell=None):
+        """Get encoder distance for currently selected gate"""
+        if 0 <= self.gate_selected < len(self.encoder_sensors):
+            encoder = self.encoder_sensors[self.gate_selected]
+            if encoder:
+                if dwell is not None:
+                    self.movequeues_dwell(dwell, mmu_toolhead=True)
+                return encoder.get_distance()
+        return 0.0
 
     def _get_encoder_counts(self, dwell=False):
         if self._encoder_dwell(dwell):
@@ -5921,6 +6668,8 @@ class Mmu:
                 self.led_manager.gate_map_changed(_prev_gate)
                 self.led_manager.gate_map_changed(gate)
                 self._espooler_assist_on() # Will switch assist print mode if printing
+                if gate >= 0 and gate != self.TOOL_GATE_BYPASS:
+                    self._switch_to_gate_encoder(gate)
 
         except MmuError as ee:
             self.unselect_gate()
