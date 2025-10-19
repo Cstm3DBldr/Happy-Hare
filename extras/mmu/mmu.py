@@ -120,9 +120,11 @@ class Mmu:
     SENSOR_SELECTOR_TOUCH      = "mmu_sel_touch"  # For LinearSelector
     SENSOR_SELECTOR_HOME       = "mmu_sel_home"   # For LinearSelector
     SENSOR_PRE_GATE_PREFIX     = "mmu_pre_gate"
+    SENSOR_EXTRUDER_ENTRY_PREFIX = "extruder"      # Changed from single sensor
+    SENSOR_TOOLHEAD_PREFIX       = "toolhead"      # Changed from single sensor
 
-    EXTRUDER_ENDSTOPS = [SENSOR_EXTRUDER_COLLISION, SENSOR_GEAR_TOUCH, SENSOR_EXTRUDER_ENTRY, SENSOR_EXTRUDER_NONE, SENSOR_COMPRESSION]
-    GATE_ENDSTOPS     = [SENSOR_GATE, SENSOR_ENCODER, SENSOR_GEAR_PREFIX, SENSOR_EXTRUDER_ENTRY]
+    EXTRUDER_ENDSTOPS = [SENSOR_EXTRUDER_COLLISION, SENSOR_GEAR_TOUCH, SENSOR_EXTRUDER_ENTRY, SENSOR_EXTRUDER_NONE, SENSOR_COMPRESSION, SENSOR_EXTRUDER_ENTRY_PREFIX]
+    GATE_ENDSTOPS     = [SENSOR_GATE, SENSOR_ENCODER, SENSOR_GEAR_PREFIX, SENSOR_EXTRUDER_ENTRY, SENSOR_EXTRUDER_ENTRY_PREFIX]
 
     # Statistics output types
     GATE_STATS_STRING     = "string"
@@ -473,6 +475,13 @@ class Mmu:
         self.tool_speed_multipliers = []
         self.select_tool_macro = config.get('select_tool_macro', default=None)
         self.select_tool_num_switches = config.getint('select_tool_num_switches', default=0, minval=0)
+        
+        # Multi-sensor initialization - extruder and toolhead sensors per gate
+        self.extruder_sensors = [None] * self.num_gates
+        self.extruder_sensor_names = [None] * self.num_gates
+        self.toolhead_sensors = [None] * self.num_gates
+        self.toolhead_sensor_names = [None] * self.num_gates
+
 
         # Logging
         self.log_level = config.getint('log_level', 1, minval=0, maxval=4)
@@ -656,7 +665,7 @@ class Mmu:
         self.gcode.register_command('__MMU_SENSOR_REMOVE', self.cmd_MMU_SENSOR_REMOVE, desc = self.cmd_MMU_SENSOR_REMOVE_help)
         self.gcode.register_command('__MMU_SENSOR_INSERT', self.cmd_MMU_SENSOR_INSERT, desc = self.cmd_MMU_SENSOR_INSERT_help)
 
-        # Register in __init__ with other commands:
+        # Commands For Multi Encoders
         self.gcode.register_command('MMU_ENCODER_STATE', self.cmd_MMU_ENCODER_STATE, 
                                    desc=self.cmd_MMU_ENCODER_STATE_help)
         self.gcode.register_command('MMU_ENCODER_CALIBRATIONS', self.cmd_MMU_ENCODER_CALIBRATIONS,
@@ -761,6 +770,34 @@ class Mmu:
         else:
             logging.warning("MMU: No encoders found")
             self.encoder_sensor = None
+        
+        # Setup extruder sensors per gate
+        extruder_sensor_found = False
+        for gate in range(self.num_gates):
+            sensor_name = "%s_%d" % (self._get_extruder_sensor_name(), gate)
+            extruder_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
+    
+            if extruder_sensor:
+                self.extruder_sensors[gate] = extruder_sensor
+                self.extruder_sensor_names[gate] = sensor_name
+                extruder_sensor_found = True
+                logging.info("MMU: Found extruder sensor '%s' for gate %d" % (sensor_name, gate))
+            else:
+                logging.warning("MMU: No extruder sensor found for gate %d" % gate)
+
+        # Setup toolhead sensors per gate
+        toolhead_sensor_found = False
+        for gate in range(self.num_gates):
+            sensor_name = "%s_%d" % (self.SENSOR_TOOLHEAD, gate)
+            toolhead_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
+    
+            if toolhead_sensor:
+                self.toolhead_sensors[gate] = toolhead_sensor
+                self.toolhead_sensor_names[gate] = sensor_name
+                toolhead_sensor_found = True
+                logging.info("MMU: Found toolhead sensor '%s' for gate %d" % (sensor_name, gate))
+            else:
+                logging.warning("MMU: No toolhead sensor found for gate %d" % gate)
     
         self.espooler = self.printer.lookup_object('mmu_espooler mmu_espooler', None)
 
@@ -1243,7 +1280,35 @@ class Mmu:
         # Schedule next callback in 5 minutes
         return eventtime + 300.0
 
+    def get_active_extruder_sensor(self):
+        """Get the extruder sensor for the currently selected gate"""
+        if self.gate_selected >= 0 and self.gate_selected < len(self.extruder_sensors):
+            return self.extruder_sensors[self.gate_selected]
+        return None
 
+    def get_active_toolhead_sensor(self):
+        """Get the toolhead sensor for the currently selected gate"""
+        if self.gate_selected >= 0 and self.gate_selected < len(self.toolhead_sensors):
+            return self.toolhead_sensors[self.gate_selected]
+        return None
+
+    def check_extruder_sensor(self, gate=None):
+        """Check extruder sensor state for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if 0 <= gate < len(self.extruder_sensors) and self.extruder_sensors[gate]:
+            return self.sensor_manager.check_sensor(self.extruder_sensor_names[gate])
+        return False
+
+    def check_toolhead_sensor(self, gate=None):
+        """Check toolhead sensor state for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if 0 <= gate < len(self.toolhead_sensors) and self.toolhead_sensors[gate]:
+            return self.sensor_manager.check_sensor(self.toolhead_sensor_names[gate])
+        return False
 
     def _setup_logging(self):
         # Setup background file based logging before logging any messages
@@ -2506,11 +2571,11 @@ class Mmu:
         t_str   = ("[T%s] " % str(self.tool_selected)) if self.tool_selected >= 0 else "BYPASS " if self.tool_selected == self.TOOL_GATE_BYPASS else "[T?] "
         g_str   = "{}".format(past(self.FILAMENT_POS_UNLOADED))
         lg_str  = "{0}{0}".format(past(self.FILAMENT_POS_HOMED_GATE)) if not self.mmu_machine.require_bowden_move else ""
-        gs_str  = "{0}{2} {1}{1}".format(*homed(self.FILAMENT_POS_HOMED_GATE, trig(gs, self.gate_homing_endstop))) if self.gate_homing_endstop in [self.SENSOR_GATE, self.SENSOR_GEAR_PREFIX, self.SENSOR_EXTRUDER_ENTRY] else ""
-        en_str  = " En {0}".format(past(self.FILAMENT_POS_IN_BOWDEN if self.gate_homing_endstop in [self.SENSOR_GATE, self.SENSOR_GEAR_PREFIX, self.SENSOR_EXTRUDER_ENTRY] else self.FILAMENT_POS_START_BOWDEN)) if self.has_encoder() else ""
+        gs_str  = "{0}{2} {1}{1}".format(*homed(self.FILAMENT_POS_HOMED_GATE, trig(gs, self.gate_homing_endstop))) if self.gate_homing_endstop in [self.SENSOR_GATE, self.SENSOR_GEAR_PREFIX, self._get_extruder_sensor_name()] else ""
+        en_str  = " En {0}".format(past(self.FILAMENT_POS_IN_BOWDEN if self.gate_homing_endstop in [self.SENSOR_GATE, self.SENSOR_GEAR_PREFIX, self._get_extruder_sensor_name()] else self.FILAMENT_POS_START_BOWDEN)) if self.has_encoder() else ""
         bowden1 = "{0}{0}{0}{0}".format(past(self.FILAMENT_POS_IN_BOWDEN)) if self.mmu_machine.require_bowden_move else ""
         bowden2 = "{0}{0}{0}{0}".format(past(self.FILAMENT_POS_END_BOWDEN)) if self.mmu_machine.require_bowden_move else ""
-        es_str  = "{0}{2} {1}{1}".format(*homed(self.FILAMENT_POS_HOMED_ENTRY, trig(es, self.SENSOR_EXTRUDER_ENTRY))) if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY) and self.mmu_machine.require_bowden_move else ""
+        es_str  = "{0}{2} {1}{1}".format(*homed(self.FILAMENT_POS_HOMED_ENTRY, trig(es, self._get_extruder_sensor_name()))) if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()) and self.mmu_machine.require_bowden_move else ""
         ex_str  = "{0}[{2} {1}{1}".format(*homed(self.FILAMENT_POS_HOMED_EXTRUDER, "Ex"))
         ts_str  = "{0}{2} {1}".format(*homed(self.FILAMENT_POS_HOMED_TS, trig(ts, self.SENSOR_TOOLHEAD))) if self.sensor_manager.has_sensor(self.SENSOR_TOOLHEAD) else ""
         nz_str  = "{} Nz]".format(past(self.FILAMENT_POS_LOADED))
@@ -2614,7 +2679,7 @@ class Mmu:
             # Bowden loading
             if self.mmu_machine.require_bowden_move:
                 if self._must_buffer_extruder_homing():
-                    if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY:
+                    if self.extruder_homing_endstop == self._get_extruder_sensor_name():
                         msg += "\n- Bowden is loaded with a fast%s %s move" % (" CORRECTED" if self.bowden_apply_correction else "", self._f_calc("calibrated_bowden_length - toolhead_entry_to_extruder - extruder_homing_buffer"))
                     else:
                         msg += "\n- Bowden is loaded with a fast%s %s move" % (" CORRECTED" if self.bowden_apply_correction else "", self._f_calc("calibrated_bowden_length - extruder_homing_buffer"))
@@ -2631,7 +2696,7 @@ class Mmu:
                     msg += ", then homes a maxium of %s to extruder using 'touch' (stallguard) detection" % self._f_calc("extruder_homing_max")
                 else:
                     msg += ", then homes a maximum of %s to %s sensor" % (self._f_calc("extruder_homing_max"), self.extruder_homing_endstop.upper())
-                if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY:
+                if self.extruder_homing_endstop == self._get_extruder_sensor_name():
                     msg += " and then moves %s to extruder extrance" % self._f_calc("toolhead_entry_to_extruder")
             else:
                 if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_NONE and not self.sensor_manager.has_sensor(self.SENSOR_TOOLHEAD):
@@ -2682,7 +2747,7 @@ class Mmu:
                     msg += "\n- Tip is formed by slicer only when printing"
 
             # Extruder unloading
-            if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+            if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
                 msg += "\n- Extruder (synced) unloads by reverse homing a maximum of %s to EXTRUDER sensor" % self._f_calc("toolhead_entry_to_extruder + toolhead_extruder_to_nozzle - toolhead_residual_filament - toolhead_ooze_reduction - toolchange_retract + toolhead_unload_safety_margin")
             elif self.sensor_manager.has_sensor(self.SENSOR_TOOLHEAD):
                 msg += "\n- Extruder (optionally synced) unloads by reverse homing a maximum %s to TOOLHEAD sensor" % self._f_calc("toolhead_sensor_to_nozzle - toolhead_residual_filament - toolhead_ooze_reduction - toolchange_retract + toolhead_unload_safety_margin")
@@ -2692,7 +2757,7 @@ class Mmu:
 
             # Bowden unloading
             if self.mmu_machine.require_bowden_move:
-                if self.has_encoder() and self.bowden_pre_unload_test and not self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+                if self.has_encoder() and self.bowden_pre_unload_test and not self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
                     msg += "\n- Bowden is unloaded with a short %s validation move before %s fast move" % (self._f_calc("encoder_move_step_size"), self._f_calc("calibrated_bowden_length - gate_unload_buffer - encoder_move_step_size"))
                 else:
                     msg += "\n- Bowden is unloaded with a fast %s move" % self._f_calc("calibrated_bowden_length - gate_unload_buffer")
@@ -2927,11 +2992,11 @@ class Mmu:
             raise MmuError("Failed to home to toolhead sensor")
 
         toolhead_entry_to_extruder = 0.
-        if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+        if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
             # Retract clear of extruder sensor and then home in "extrude" direction
-            actual,fhomed,_,_ = self.trace_filament_move("Reverse homing off extruder entry sensor", -(sensor_homing + toolhead_extruder_to_nozzle - toolhead_sensor_to_nozzle), motor="gear+extruder", homing_move=-1, endstop_name=self.SENSOR_EXTRUDER_ENTRY)
+            actual,fhomed,_,_ = self.trace_filament_move("Reverse homing off extruder entry sensor", -(sensor_homing + toolhead_extruder_to_nozzle - toolhead_sensor_to_nozzle), motor="gear+extruder", homing_move=-1, endstop_name=self._get_extruder_sensor_name())
             actual,_,_,_ = self.trace_filament_move("Moving before extruder entry sensor", -20, motor="gear+extruder")
-            actual,fhomed,_,_ = self.trace_filament_move("Homing to extruder entry sensor", 40, motor="gear+extruder", homing_move=1, endstop_name=self.SENSOR_EXTRUDER_ENTRY)
+            actual,fhomed,_,_ = self.trace_filament_move("Homing to extruder entry sensor", 40, motor="gear+extruder", homing_move=1, endstop_name=self._get_extruder_sensor_name())
 
             # Measure to toolhead sensor and thus derive 'toolhead_entry_to_extruder'
             if fhomed:
@@ -3212,7 +3277,7 @@ class Mmu:
 
         can_use_sensor = (
             self.extruder_homing_endstop in [
-                self.SENSOR_EXTRUDER_ENTRY,
+                self._get_extruder_sensor_name(),
                 self.SENSOR_COMPRESSION,
                 self.SENSOR_GEAR_TOUCH
             ] and (
@@ -3375,7 +3440,7 @@ class Mmu:
                     msg += "Calibration Results (clean nozzle):\n"
                     msg += "> toolhead_extruder_to_nozzle: %.1f (currently: %.1f)\n" % (tetn, self.toolhead_extruder_to_nozzle)
                     msg += "> toolhead_sensor_to_nozzle: %.1f (currently: %.1f)\n" % (tstn, self.toolhead_sensor_to_nozzle)
-                    if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+                    if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
                         msg += "> toolhead_entry_to_extruder: %.1f (currently: %.1f)\n" % (tete, self.toolhead_entry_to_extruder)
                     msg += line
                     self.log_always(msg)
@@ -3393,7 +3458,7 @@ class Mmu:
                     msg = line
                     msg += "Calibration Results (dirty nozzle):\n"
                     msg += "> toolhead_residual_filament: %.1f (currently: %.1f)\n" % (tor, self.toolhead_residual_filament)
-                    if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+                    if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
                         msg += "> toolhead_entry_to_extruder: %.1f (currently: %.1f)\n" % (tete, self.toolhead_entry_to_extruder)
                     msg += line
                     self.log_always(msg)
@@ -4946,7 +5011,7 @@ class Mmu:
                 if self._must_buffer_extruder_homing():
                     deficit = self.extruder_homing_buffer
                     # Further reduce to compensate for distance from extruder sensor to extruder entry gear
-                    deficit -= self.toolhead_entry_to_extruder if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY else 0
+                    deficit -= self.toolhead_entry_to_extruder if self.extruder_homing_endstop == self._get_extruder_sensor_name() else 0
                 length -= deficit # Reduce fast move distance
 
             if length > 0:
@@ -5027,7 +5092,7 @@ class Mmu:
 
                 # Optional pre-unload safety step
                 if (full and self.has_encoder() and self.bowden_pre_unload_test and
-                    self.sensor_manager.check_sensor(self.SENSOR_EXTRUDER_ENTRY) is not False and
+                    self.sensor_manager.check_sensor(self._get_extruder_sensor_name()) is not False and
                     self.sensor_manager.check_all_sensors_before(self.FILAMENT_POS_START_BOWDEN, self.gate_selected, loading=False) is not False
                 ):
                     with self._require_encoder():
@@ -5086,6 +5151,9 @@ class Mmu:
         self.selector.filament_drive()
         measured = extra = 0.
         homing_movement = None
+        sensor_name = self._get_extruder_sensor_name()  # Gets sensor for current gate
+        if self.sensor_manager.has_sensor(sensor_name):
+            if self.sensor_manager.check_sensor(sensor_name):
 
         if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_NONE:
             homed = True
@@ -5105,7 +5173,7 @@ class Mmu:
                 self._set_filament_pos_state(self.FILAMENT_POS_HOMED_ENTRY)
 
                 # Make adjustment based on sensor: extruder - move a little move, compression - back off a little
-                if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY:
+                if self.extruder_homing_endstop == self._get_extruder_sensor_name():
                     extra = self.toolhead_entry_to_extruder
                     _,_,measured,_ = self.trace_filament_move("Aligning filament to extruder gear", extra, motor="gear")
                 elif self.extruder_homing_endstop == self.SENSOR_COMPRESSION:
@@ -5301,14 +5369,14 @@ class Mmu:
                 motor = "extruder"
 
             fhomed = False
-            if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY) and not extruder_only:
+            if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()) and not extruder_only:
                 # BEST Strategy: Extruder exit movement leveraging extruder entry sensor. Must be synced
                 synced = True
                 self.selector.filament_drive()
                 speed = self.extruder_sync_unload_speed
                 motor = "gear+extruder"
 
-                if not self.sensor_manager.check_sensor(self.SENSOR_EXTRUDER_ENTRY):
+                if not self.sensor_manager.check_sensor(self._get_extruder_sensor_name()):
                     if self.sensor_manager.check_sensor(self.SENSOR_TOOLHEAD):
                         raise MmuError("Toolhead or extruder sensor failure. Extruder sensor reports no filament but toolhead sensor is still triggered")
                     else:
@@ -5317,7 +5385,7 @@ class Mmu:
                 else:
                     hlength = self.toolhead_extruder_to_nozzle + self.toolhead_entry_to_extruder + self.toolhead_unload_safety_margin - self.toolhead_residual_filament - self.toolhead_ooze_reduction - self.toolchange_retract
                     self.log_debug("Reverse homing up to %.1fmm off extruder sensor (synced) to exit extruder" % hlength)
-                    _,fhomed,_,_ = self.trace_filament_move("Reverse homing off extruder sensor", -hlength, motor=motor, homing_move=-1, endstop_name=self.SENSOR_EXTRUDER_ENTRY)
+                    _,fhomed,_,_ = self.trace_filament_move("Reverse homing off extruder sensor", -hlength, motor=motor, homing_move=-1, endstop_name=self._get_extruder_sensor_name())
 
                 if not fhomed:
                     raise MmuError("Failed to reach extruder entry sensor after moving %.1fmm" % hlength)
@@ -6189,7 +6257,7 @@ class Mmu:
             self.log_info("Attempting to recover filament position...")
 
         ts = self.sensor_manager.check_sensor(self.SENSOR_TOOLHEAD)
-        es = self.sensor_manager.check_sensor(self.SENSOR_EXTRUDER_ENTRY)
+        es = self.sensor_manager.check_sensor(self._get_extruder_sensor_name())
 
         gs = self.sensor_manager.check_sensor(self.sensor_manager.get_mapped_endstop_name(self.gate_homing_endstop))
 
@@ -6273,7 +6341,7 @@ class Mmu:
     # Return True/False if detected or None if test not possible
     def check_filament_in_extruder(self):
         # First double check extruder entry sensor if fitted
-        es = self.sensor_manager.check_sensor(self.SENSOR_EXTRUDER_ENTRY)
+        es = self.sensor_manager.check_sensor(self._get_extruder_sensor_name())
         if es is not None:
             return es
 
@@ -7489,7 +7557,7 @@ class Mmu:
             elif tool == self.TOOL_GATE_UNKNOWN and self.tool_selected == self.TOOL_GATE_BYPASS and loaded == -1:
                 # This is to be able to get out of "stuck in bypass" state
                 ts = self.sensor_manager.check_sensor(self.SENSOR_TOOLHEAD)
-                es = self.sensor_manager.check_sensor(self.SENSOR_EXTRUDER_ENTRY)
+                es = self.sensor_manager.check_sensor(self._get_extruder_sensor_name())
                 if ts or es: # TODO use check_all_sensors() call when sensor_manager is fixed
                     self._set_filament_pos_state(self.FILAMENT_POS_LOADED, silent=True)
                 else:
@@ -7873,7 +7941,7 @@ class Mmu:
             msg += "\ngate_preload_parking_distance = %s" % self.gate_preload_parking_distance
             msg += "\ngate_autoload = %s" % self.gate_autoload
             msg += "\ngate_final_eject_distance = %s" % self.gate_final_eject_distance
-            if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+            if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
                 msg += "\nbypass_autoload = %s" % self.bypass_autoload
             if self.has_encoder():
                 msg += "\nbowden_apply_correction = %d" % self.bowden_apply_correction
@@ -7886,7 +7954,7 @@ class Mmu:
             if self.sensor_manager.has_sensor(self.SENSOR_TOOLHEAD):
                 msg += "\ntoolhead_sensor_to_nozzle = %.1f" % self.toolhead_sensor_to_nozzle
                 msg += "\ntoolhead_homing_max = %.1f" % self.toolhead_homing_max
-            if self.sensor_manager.has_sensor(self.SENSOR_EXTRUDER_ENTRY):
+            if self.sensor_manager.has_sensor(self._get_extruder_sensor_name()):
                 msg += "\ntoolhead_entry_to_extruder = %.1f" % self.toolhead_entry_to_extruder
             msg += "\ntoolhead_residual_filament = %.1f" % self.toolhead_residual_filament
             msg += "\ntoolhead_ooze_reduction = %.1f" % self.toolhead_ooze_reduction
@@ -8530,7 +8598,7 @@ class Mmu:
                     elif sensor.startswith(self.SENSOR_GEAR_PREFIX) and gate == self.gate_selected:
                         process_runout = True
 
-                    elif sensor.startswith(self.SENSOR_EXTRUDER_ENTRY):
+                    elif sensor.startswith(self._get_extruder_sensor_name()):
                         raise MmuError("Filament runout occured at extruder. Manual intervention is required")
 
                     else:
@@ -8567,7 +8635,7 @@ class Mmu:
                     if not self.is_printing() and self.gate_autoload:
                         self.gcode.run_script_from_command("MMU_PRELOAD GATE=%d" % gate)
 
-                elif sensor == self.SENSOR_EXTRUDER_ENTRY:
+                elif sensor == self._get_extruder_sensor_name():
                     if self.gate_selected != self.TOOL_GATE_BYPASS:
                         msg = "bypass not selected"
                     elif self.is_printing():
