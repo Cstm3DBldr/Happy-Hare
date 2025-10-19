@@ -5174,8 +5174,7 @@ class Mmu:
         homing_movement = None
         sensor_name = self._get_extruder_sensor_name()  # Gets sensor for current gate
         if self.sensor_manager.has_sensor(sensor_name):
-            if self.sensor_manager.check_sensor(sensor_name):
-
+            pass
         if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_NONE:
             homed = True
 
