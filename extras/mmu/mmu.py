@@ -774,7 +774,7 @@ class Mmu:
         # Setup extruder sensors per gate
         extruder_sensor_found = False
         for gate in range(self.num_gates):
-            sensor_name = "%s_%d" % (self._get_extruder_sensor_name(), gate)
+            sensor_name = self._get_extruder_sensor_name(gate)
             extruder_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
     
             if extruder_sensor:
@@ -788,7 +788,7 @@ class Mmu:
         # Setup toolhead sensors per gate
         toolhead_sensor_found = False
         for gate in range(self.num_gates):
-            sensor_name = "%s_%d" % (self.SENSOR_TOOLHEAD, gate)
+            sensor_name = self._get_toolhead_sensor_name(gate)
             toolhead_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
     
             if toolhead_sensor:
@@ -1309,6 +1309,28 @@ class Mmu:
         if 0 <= gate < len(self.toolhead_sensors) and self.toolhead_sensors[gate]:
             return self.sensor_manager.check_sensor(self.toolhead_sensor_names[gate])
         return False
+
+    def _get_extruder_sensor_name(self, gate=None):
+        """Get the extruder sensor name for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+        return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+
+    def _get_toolhead_sensor_name(self, gate=None):
+        """Get the toolhead sensor name for specified gate"""
+        if gate is None:
+            gate = self.gate_selected
+        return "%s_%d" % (self.SENSOR_TOOLHEAD_PREFIX, gate)
+
+    def has_extruder_sensor(self, gate=None):
+        """Check if extruder sensor exists for specified gate"""
+        sensor_name = self._get_extruder_sensor_name(gate)
+        return self.sensor_manager.has_sensor(sensor_name)
+
+    def has_toolhead_sensor(self, gate=None):
+        """Check if toolhead sensor exists for specified gate"""
+        sensor_name = self._get_toolhead_sensor_name(gate)
+        return self.sensor_manager.has_sensor(sensor_name)
 
     def _setup_logging(self):
         # Setup background file based logging before logging any messages
@@ -5254,7 +5276,7 @@ class Mmu:
             if has_toolhead:
                 # With toolhead sensor for accuracy we always first home to toolhead sensor past the extruder entrance
                 # The remaining load distance is relative to the toolhead sensor
-                if self.sensor_manager.check_sensor(self.SENSOR_TOOLHEAD):
+                if self.check_toolhead_sensor():
                     raise MmuError("Possible toolhead sensor malfunction - filament detected before it entered extruder")
                 self.log_debug("Homing up to %.1fmm to toolhead sensor%s" % (self.toolhead_homing_max, (" (synced)" if synced else "")))
                 actual,fhomed,measured,_ = self.trace_filament_move("Homing to toolhead sensor", self.toolhead_homing_max, motor=motor, homing_move=1, endstop_name=self.SENSOR_TOOLHEAD)
