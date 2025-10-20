@@ -724,12 +724,12 @@ class Mmu:
             return self.encoder_sensors[self.gate_selected]
         return None
 
-    def _get_extruder_sensor_name(self, gate=None):
-        """Get the extruder sensor name for specified gate"""
-        if gate is None:
-            gate = self.gate_selected
-        return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
-
+    def _get_extruder_sensor_name(self):
+        """Get base name for per-gate extruder sensors"""
+        if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY:
+            return self.SENSOR_EXTRUDER_ENTRY_PREFIX
+        return self.extruder_homing_endstop
+	
     def _get_toolhead_sensor_name(self, gate=None):
         """Get the toolhead sensor name for specified gate"""
         if gate is None:
@@ -1247,6 +1247,19 @@ class Mmu:
     
         return True
 
+    def _get_active_endstop_name(self, endstop_type, gate=None):
+        """Get the correct endstop name for current gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if endstop_type == 'extruder':
+            if self.extruder_homing_endstop in [self.SENSOR_EXTRUDER_ENTRY, self.SENSOR_EXTRUDER_ENTRY_PREFIX]:
+                return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+        elif endstop_type == 'toolhead':
+            return "%s_%d" % (self.SENSOR_TOOLHEAD_PREFIX, gate)
+    
+        return self.extruder_homing_endstop if endstop_type == 'extruder' else None
+	
     def _save_all_encoder_states(self):
         """Save all encoder states"""
         self._save_current_encoder_state()
