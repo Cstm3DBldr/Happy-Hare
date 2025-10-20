@@ -3220,7 +3220,7 @@ class Mmu:
         elif action == 'COPY':
             # Copy resolution from one gate to another
             from_gate = gcmd.get_int('FROM', minval=0, maxval=self.num_gates-1)
-            to_gate = gcmd.get_int('TO', minval=0, maxval=self.num_gates-1)
+            to_('TO', minval=0, maxval=self.num_gates-1)
         
             resolutions = self.save_variables.allVariables.get(self.VARS_MMU_ENCODER_RESOLUTION, {})
         
