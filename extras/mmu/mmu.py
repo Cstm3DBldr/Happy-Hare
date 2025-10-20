@@ -3317,13 +3317,13 @@ class Mmu:
             if self.check_if_not_calibrated(self.CALIBRATED_GEAR_0|self.CALIBRATED_ENCODER|self.CALIBRATED_SELECTOR, check_gates=[self.gate_selected]): return
 
         can_use_sensor = (
-            self._get_active_endstop_name('extruder', gate) in [
+            self._get_active_endstop_name('extruder', self.gate_selected) in [
                 self._get_extruder_sensor_name(),
                 self.SENSOR_COMPRESSION,
                 self.SENSOR_GEAR_TOUCH
             ] and (
-                self.sensor_manager.has_sensor(self._get_active_endstop_name('extruder', gate)) or
-                self.gear_rail.is_endstop_virtual(self._get_active_endstop_name('extruder', gate))
+                self.sensor_manager.has_sensor(self._get_active_endstop_name('extruder', self.gate_selected)) or
+                self.gear_rail.is_endstop_virtual(self._get_active_endstop_name('extruder', self.gate_selected))
             )
         )
         can_auto_calibrate = self.has_encoder() or can_use_sensor
