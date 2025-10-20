@@ -718,6 +718,25 @@ class Mmu:
         if gate is not None:
             return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
         return self.SENSOR_EXTRUDER_ENTRY_PREFIX
+
+	def _get_active_endstop_name(self, endstop_type='extruder', gate=None):
+        """Get the correct endstop name for current gate"""
+        if gate is None:
+            gate = self.gate_selected
+    
+        if endstop_type == 'extruder':
+            if self.extruder_homing_endstop in [self.SENSOR_EXTRUDER_ENTRY, self.SENSOR_EXTRUDER_ENTRY_PREFIX]:
+                # Check if per-gate sensor exists
+                sensor_name = "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+                if self.sensor_manager.has_sensor(sensor_name):
+                    return sensor_name
+            return self.extruder_homing_endstop
+        elif endstop_type == 'toolhead':
+            sensor_name = "%s_%d" % (self.SENSOR_TOOLHEAD_PREFIX, gate)
+            if self.sensor_manager.has_sensor(sensor_name):
+                return sensor_name
+    
+        return None
 	
     def get_active_encoder(self):
         """Get the encoder for the currently selected gate"""
