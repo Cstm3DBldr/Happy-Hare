@@ -712,7 +712,13 @@ class Mmu:
         self.reinit()
         self._reset_statistics()
         self.counters = {}
-
+    def _get_extruder_sensor_name(self, gate=None):
+        """Get the name for extruder sensor - per-gate or single"""
+        # Read from config since self.extruder_homing_endstop not set during init
+        if gate is not None:
+            return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+        return self.SENSOR_EXTRUDER_ENTRY_PREFIX
+	
     def get_active_encoder(self):
         """Get the encoder for the currently selected gate"""
         # Safety check
@@ -724,14 +730,6 @@ class Mmu:
             return self.encoder_sensors[self.gate_selected]
         return None
 
-    def _get_extruder_sensor_name(self, gate=None):
-        """Get the name for extruder sensor - per-gate or single"""
-        if self.extruder_homing_endstop in [self.SENSOR_EXTRUDER_ENTRY, self.SENSOR_EXTRUDER_ENTRY_PREFIX]:
-            if gate is not None:
-                return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
-            return self.SENSOR_EXTRUDER_ENTRY_PREFIX
-        return self.extruder_homing_endstop
-	
     def _get_toolhead_sensor_name(self, gate=None):
         """Get the toolhead sensor name for specified gate"""
         if gate is None:
