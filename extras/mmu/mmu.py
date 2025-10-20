@@ -7829,10 +7829,10 @@ class Mmu:
         self.bowden_allowable_unload_delta = self.bowden_allowable_load_delta = gcmd.get_float('BOWDEN_ALLOWABLE_LOAD_DELTA', self.bowden_allowable_load_delta, minval=1., maxval=50.)
         self.bowden_pre_unload_test = gcmd.get_int('BOWDEN_PRE_UNLOAD_TEST', self.bowden_pre_unload_test, minval=0, maxval=1)
 
-        extruder_homing_endstop = gcmd.get('EXTRUDER_HOMING_ENDSTOP', self._get_active_endstop_name('extruder', gate))
+        extruder_homing_endstop = gcmd.get('EXTRUDER_HOMING_ENDSTOP', self.extruder_homing_endstop)
         if extruder_homing_endstop not in self.EXTRUDER_ENDSTOPS:
             raise gcmd.error("extruder_homing_endstop is invalid. Options are: %s" % self.EXTRUDER_ENDSTOPS)
-        self._get_active_endstop_name('extruder', gate) = extruder_homing_endstop
+        self.extruder_homing_endstop = extruder_homing_endstop
 
         self.extruder_homing_max = gcmd.get_float('EXTRUDER_HOMING_MAX', self.extruder_homing_max, above=10.)
         self.extruder_force_homing = gcmd.get_int('EXTRUDER_FORCE_HOMING', self.extruder_force_homing, minval=0, maxval=1)
@@ -7988,7 +7988,7 @@ class Mmu:
                 msg += "\nbowden_allowable_load_delta = %d" % self.bowden_allowable_load_delta
                 msg += "\nbowden_pre_unload_test = %d" % self.bowden_pre_unload_test
             msg += "\nextruder_force_homing = %d" % self.extruder_force_homing
-            msg += "\nextruder_homing_endstop = %s" % self._get_active_endstop_name('extruder', gate)
+            msg += "\nextruder_homing_endstop = %s" % self.extruder_homing_endstop
             msg += "\nextruder_homing_max = %.1f" % self.extruder_homing_max
             msg += "\ntoolhead_extruder_to_nozzle = %.1f" % self.toolhead_extruder_to_nozzle
             if self.sensor_manager.has_sensor(self.SENSOR_TOOLHEAD):
