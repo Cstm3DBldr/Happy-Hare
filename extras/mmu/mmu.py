@@ -1716,7 +1716,7 @@ class Mmu:
             except ValueError:
                 return s
 
-	def _get_active_endstop_name(self, endstop_type='extruder', gate=None):
+    def _get_active_endstop_name(self, endstop_type='extruder', gate=None):
         """Get the correct endstop name for current gate"""
         if gate is None:
             gate = self.gate_selected
