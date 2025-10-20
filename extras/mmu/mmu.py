@@ -123,8 +123,8 @@ class Mmu:
     SENSOR_EXTRUDER_ENTRY_PREFIX = "extruder"      # Changed from single sensor
     SENSOR_TOOLHEAD_PREFIX       = "toolhead"      # Changed from single sensor
 
-    EXTRUDER_ENDSTOPS = [SENSOR_EXTRUDER_COLLISION, SENSOR_GEAR_TOUCH, SENSOR_EXTRUDER_NONE, SENSOR_COMPRESSION, SENSOR_EXTRUDER_ENTRY_PREFIX]
-    GATE_ENDSTOPS     = [SENSOR_GATE, SENSOR_ENCODER, SENSOR_GEAR_PREFIX, SENSOR_EXTRUDER_ENTRY_PREFIX]
+    EXTRUDER_ENDSTOPS = [SENSOR_EXTRUDER_COLLISION, SENSOR_GEAR_TOUCH, SENSOR_EXTRUDER_ENTRY, SENSOR_EXTRUDER_NONE, SENSOR_COMPRESSION, SENSOR_EXTRUDER_ENTRY_PREFIX]
+    GATE_ENDSTOPS     = [SENSOR_GATE, SENSOR_ENCODER, SENSOR_GEAR_PREFIX, SENSOR_EXTRUDER_ENTRY, SENSOR_EXTRUDER_ENTRY_PREFIX]
 
     # Statistics output types
     GATE_STATS_STRING     = "string"
@@ -795,78 +795,31 @@ class Mmu:
         # Setup extruder sensors per gate
         extruder_sensor_found = False
         for gate in range(self.num_gates):
-            sensor_name = "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+            sensor_name = self._get_extruder_sensor_name(gate)
             extruder_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
-
+    
             if extruder_sensor:
                 self.extruder_sensors[gate] = extruder_sensor
                 self.extruder_sensor_names[gate] = sensor_name
                 extruder_sensor_found = True
                 logging.info("MMU: Found extruder sensor '%s' for gate %d" % (sensor_name, gate))
-        
-                # ===================================================================
-                # CRITICAL: Register as endstop on gear rail so homing can find it
-                # ===================================================================
-                try:
-                    # Get the pin configuration from the sensor config
-                    pin = extruder_sensor.runout_helper.switch_pin
-            
-                    # Register this sensor as an extra endstop on the gear rail
-                    # This allows trace_filament_move() to home to it
-                    self.gear_rail.add_extra_endstop(
-                        pin=pin,
-                        name=sensor_name,
-                        register=True,
-                        bind_rail_steppers=True
-                    )
-                    logging.info("MMU: Registered '%s' as homing endstop on gear rail" % sensor_name)
-            
-                except AttributeError as e:
-                    # Older Happy Hare might not have this attribute structure
-                    logging.warning("MMU: Could not auto-register endstop '%s': %s" % (sensor_name, str(e)))
-                    logging.warning("MMU: You may need to manually configure endstops in mmu_hardware.cfg")
-            
-                except Exception as e:
-                    logging.error("MMU: Failed to register endstop '%s': %s" % (sensor_name, str(e)))
             else:
                 logging.warning("MMU: No extruder sensor found for gate %d" % gate)
 
-        # Setup toolhead sensors per gate AND register as endstops
+        # Setup toolhead sensors per gate
         toolhead_sensor_found = False
         for gate in range(self.num_gates):
-            sensor_name = "%s_%d" % (self.SENSOR_TOOLHEAD_PREFIX, gate)
+            sensor_name = self._get_toolhead_sensor_name(gate)
             toolhead_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
-
+    
             if toolhead_sensor:
                 self.toolhead_sensors[gate] = toolhead_sensor
                 self.toolhead_sensor_names[gate] = sensor_name
                 toolhead_sensor_found = True
                 logging.info("MMU: Found toolhead sensor '%s' for gate %d" % (sensor_name, gate))
-        
-                # ===================================================================
-                # CRITICAL: Register as endstop on gear rail so homing can find it
-                # ===================================================================
-                try:
-                    # Get the pin configuration from the sensor config
-                    pin = toolhead_sensor.runout_helper.switch_pin
-            
-                    # Register this sensor as an extra endstop on the gear rail
-                    self.gear_rail.add_extra_endstop(
-                        pin=pin,
-                        name=sensor_name,
-                        register=True,
-                        bind_rail_steppers=True
-                    )
-                    logging.info("MMU: Registered '%s' as homing endstop on gear rail" % sensor_name)
-            
-                except AttributeError as e:
-                    logging.warning("MMU: Could not auto-register endstop '%s': %s" % (sensor_name, str(e)))
-            
-                except Exception as e:
-                    logging.error("MMU: Failed to register endstop '%s': %s" % (sensor_name, str(e)))
             else:
                 logging.warning("MMU: No toolhead sensor found for gate %d" % gate)
-
+    
         self.espooler = self.printer.lookup_object('mmu_espooler mmu_espooler', None)
 
     cmd_MMU_ENCODER_CALIBRATIONS_help = "Display all encoder calibration values"
@@ -3343,21 +3296,16 @@ class Mmu:
         else:
             if self.check_if_not_calibrated(self.CALIBRATED_GEAR_0|self.CALIBRATED_ENCODER|self.CALIBRATED_SELECTOR, check_gates=[self.gate_selected]): return
 
-        # Get the per-gate sensor name for current gate
-        sensor_name = self._get_extruder_sensor_name()
-    
-        # Check if we can use sensor-based calibration
         can_use_sensor = (
-            # Check if config is set to use extruder sensors (prefix or specific sensor)
-            (self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY_PREFIX or
-             self.extruder_homing_endstop == sensor_name or
-             self.extruder_homing_endstop == self.SENSOR_COMPRESSION or
-             self.extruder_homing_endstop == self.SENSOR_GEAR_TOUCH) and
-            # Verify the sensor actually exists
-            (self.sensor_manager.has_sensor(sensor_name) or
-             self.gear_rail.is_endstop_virtual(sensor_name))
+            self.extruder_homing_endstop in [
+                self._get_extruder_sensor_name(),
+                self.SENSOR_COMPRESSION,
+                self.SENSOR_GEAR_TOUCH
+            ] and (
+                self.sensor_manager.has_sensor(self.extruder_homing_endstop) or
+                self.gear_rail.is_endstop_virtual(self.extruder_homing_endstop)
+            )
         )
-    
         can_auto_calibrate = self.has_encoder() or can_use_sensor
 
         if not can_auto_calibrate and not manual:
@@ -5224,66 +5172,43 @@ class Mmu:
         self.selector.filament_drive()
         measured = extra = 0.
         homing_movement = None
-    
-        # Get the per-gate sensor name for current gate
-        sensor_name = self._get_extruder_sensor_name()  # Returns "extruder_0", "extruder_1", etc.
-    
-        # Check if we should use the per-gate sensor
-        if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY_PREFIX:
-            # User configured to use per-gate extruder sensors
-            if self.sensor_manager.has_sensor(sensor_name):
-                self.log_debug("Using per-gate extruder sensor: %s" % sensor_name)
-                # Override the endstop to use the per-gate sensor name
-                endstop_to_use = sensor_name
-            else:
-                raise MmuError("Per-gate extruder sensor '%s' not found for gate %d" % (sensor_name, self.gate_selected))
-        else:
-            # Use the configured endstop name as-is
-            endstop_to_use = self.extruder_homing_endstop
-    
+        sensor_name = self._get_extruder_sensor_name()  # Gets sensor for current gate
+        if self.sensor_manager.has_sensor(sensor_name):
+            pass
         if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_NONE:
             homed = True
-        
+
         elif self.extruder_homing_endstop == self.SENSOR_EXTRUDER_COLLISION:
             if self.has_encoder():
-                actual, homed, measured, _ = self._home_to_extruder_collision_detection(max_length)
+                actual,homed,measured,_ = self._home_to_extruder_collision_detection(max_length)
                 homing_movement = actual
             else:
                 raise MmuError("Cannot home to extruder using 'collision' method because encoder is not configured or disabled!")
-    
+
         else:
-            self.log_debug("Homing to extruder '%s' endstop, up to %.1fmm" % (endstop_to_use, max_length))
-            actual, homed, measured, _ = self.trace_filament_move(
-                "Homing filament to extruder endstop", 
-                max_length, 
-                motor="gear", 
-                homing_move=1, 
-                endstop_name=endstop_to_use  # ? NOW USES CORRECT PER-GATE NAME
-            )
-        
+            self.log_debug("Homing to extruder '%s' endstop, up to %.1fmm" % (self.extruder_homing_endstop, max_length))
+            actual,homed,measured,_ = self.trace_filament_move("Homing filament to extruder endstop", max_length, motor="gear", homing_move=1, endstop_name=self.extruder_homing_endstop)
             if homed:
-                self.log_debug("Extruder endstop '%s' reached after %.1fmm (measured %.1fmm)" % (endstop_to_use, actual, measured))
+                self.log_debug("Extruder endstop '%s' reached after %.1fmm (measured %.1fmm)" % (self.extruder_homing_endstop, actual, measured))
                 self._set_filament_pos_state(self.FILAMENT_POS_HOMED_ENTRY)
-            
-                # Make adjustment based on sensor type
-                if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY_PREFIX:
-                    # Using per-gate extruder sensor - move to extruder gear
+
+                # Make adjustment based on sensor: extruder - move a little move, compression - back off a little
+                if self.extruder_homing_endstop == self._get_extruder_sensor_name():
                     extra = self.toolhead_entry_to_extruder
-                    _, _, measured, _ = self.trace_filament_move("Aligning filament to extruder gear", extra, motor="gear")
-                
+                    _,_,measured,_ = self.trace_filament_move("Aligning filament to extruder gear", extra, motor="gear")
                 elif self.extruder_homing_endstop == self.SENSOR_COMPRESSION:
-                    # Compression sensor - report buffer adjustment
+                    # We don't actually back off because the buffer absorbs the overrun but we still report for calibration
                     extra = -(self.sync_feedback_manager.sync_feedback_buffer_range / 2.)
-        
+
             homing_movement = actual
-    
+
         if not homed:
             self._set_filament_pos_state(self.FILAMENT_POS_END_BOWDEN)
-            raise MmuError("Failed to reach extruder '%s' endstop after moving %.1fmm" % (endstop_to_use, max_length))
-    
+            raise MmuError("Failed to reach extruder '%s' endstop after moving %.1fmm" % (self.extruder_homing_endstop, max_length))
+
         if measured > (max_length * 0.8):
             self.log_warning("Warning: 80%% of 'extruder_homing_max' was used homing. You may want to adjust your calibrated bowden length ('%s') or increase 'extruder_homing_max'" % self.VARS_MMU_CALIB_BOWDEN_LENGTH)
-    
+
         self._set_filament_pos_state(self.FILAMENT_POS_HOMED_EXTRUDER)
         return homing_movement, extra
 
