@@ -724,9 +724,11 @@ class Mmu:
             return self.encoder_sensors[self.gate_selected]
         return None
 
-    def _get_extruder_sensor_name(self):
-        """Get base name for per-gate extruder sensors"""
-        if self.extruder_homing_endstop == self.SENSOR_EXTRUDER_ENTRY:
+    def _get_extruder_sensor_name(self, gate=None):
+        """Get the name for extruder sensor - per-gate or single"""
+        if self.extruder_homing_endstop in [self.SENSOR_EXTRUDER_ENTRY, self.SENSOR_EXTRUDER_ENTRY_PREFIX]:
+            if gate is not None:
+                return "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
             return self.SENSOR_EXTRUDER_ENTRY_PREFIX
         return self.extruder_homing_endstop
 	
@@ -795,9 +797,23 @@ class Mmu:
         # Setup extruder sensors per gate
         extruder_sensor_found = False
         for gate in range(self.num_gates):
-            sensor_name = self._get_extruder_sensor_name(gate)
-            extruder_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
+            # Get base name from config instead of self since attributes aren't set yet
+            extruder_endstop = config.getchoice('extruder_homing_endstop', 
+                                                {o: o for o in [self.SENSOR_EXTRUDER_COLLISION, 
+                                                               self.SENSOR_GEAR_TOUCH, 
+                                                               self.SENSOR_EXTRUDER_ENTRY, 
+                                                               self.SENSOR_EXTRUDER_NONE, 
+                                                               self.SENSOR_COMPRESSION, 
+                                                               self.SENSOR_EXTRUDER_ENTRY_PREFIX]}, 
+                                                self.SENSOR_EXTRUDER_NONE)
     
+            if extruder_endstop in [self.SENSOR_EXTRUDER_ENTRY, self.SENSOR_EXTRUDER_ENTRY_PREFIX]:
+                sensor_name = "%s_%d" % (self.SENSOR_EXTRUDER_ENTRY_PREFIX, gate)
+            else:
+                continue  # Skip if not using per-gate extruder sensors
+    
+            extruder_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
+
             if extruder_sensor:
                 self.extruder_sensors[gate] = extruder_sensor
                 self.extruder_sensor_names[gate] = sensor_name
@@ -805,20 +821,6 @@ class Mmu:
                 logging.info("MMU: Found extruder sensor '%s' for gate %d" % (sensor_name, gate))
             else:
                 logging.warning("MMU: No extruder sensor found for gate %d" % gate)
-
-        # Setup toolhead sensors per gate
-        toolhead_sensor_found = False
-        for gate in range(self.num_gates):
-            sensor_name = self._get_toolhead_sensor_name(gate)
-            toolhead_sensor = self.printer.lookup_object('filament_switch_sensor %s' % sensor_name, None)
-    
-            if toolhead_sensor:
-                self.toolhead_sensors[gate] = toolhead_sensor
-                self.toolhead_sensor_names[gate] = sensor_name
-                toolhead_sensor_found = True
-                logging.info("MMU: Found toolhead sensor '%s' for gate %d" % (sensor_name, gate))
-            else:
-                logging.warning("MMU: No toolhead sensor found for gate %d" % gate)
     
         self.espooler = self.printer.lookup_object('mmu_espooler mmu_espooler', None)
 
